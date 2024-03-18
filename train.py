@@ -35,12 +35,14 @@ class MCLIPDataset(Dataset):
 
     def __getitem__(self, idx):
         text = self.data.iloc[idx, 1]
+        target = self.data.iloc[idx, 2]
         inputs = self.tokenizer(text, max_length=self.max_length, padding="max_length", truncation=True,
                                 return_tensors="pt")
-        return inputs, self.clip_embedding(text)
+        return inputs, self.clip_embedding(target)
 
 
-def train(model: MCLIP, train_loader: DataLoader, optimizer: optim.Optimizer, scheduler: optim.lr_scheduler, device: torch.device):
+def train(model: MCLIP, train_loader: DataLoader, optimizer: optim.Optimizer, scheduler: optim.lr_scheduler,
+          device: torch.device, accelerator: Accelerator):
     model.train()
     running_loss = 0.0
     for inputs, targets in tqdm.tqdm(train_loader, total=len(train_loader)):
@@ -48,7 +50,7 @@ def train(model: MCLIP, train_loader: DataLoader, optimizer: optim.Optimizer, sc
         optimizer.zero_grad()
         outputs = model.forward_before_clip(inputs["input_ids"])
         loss = F.mse_loss(outputs, targets)
-        loss.backward()
+        accelerator.backward(loss)
         optimizer.step()
         scheduler.step()
         running_loss += loss.item()
@@ -57,11 +59,21 @@ def train(model: MCLIP, train_loader: DataLoader, optimizer: optim.Optimizer, sc
 
 
 def main():
+    batch_size = 8
+    learning_rate = 1e-5
+    n_epochs = 10
+
     wandb.init(project="mclip")
     accelerator = Accelerator()
     device = accelerator.device
 
-    wandb.config.update({"batch_size": 8, "learning_rate": 1e-5})
+    wandb.config.update({
+        "batch_size": batch_size,
+        "learning_rate": learning_rate,
+        "device": device.type,
+        "n_epochs": n_epochs,
+        "dataset": "data.csv"
+    })
 
     print(f"Python: {sys.version}")
     print(f"PyTorch: {torch.__version__}")
@@ -75,7 +87,7 @@ def main():
 
     model = model.to(device)
     model.train()
-    optimizer = AdamW(model.parameters(), lr=1e-5)
+    optimizer = AdamW(model.parameters(), lr=learning_rate)
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=0, num_training_steps=1000)
 
     data = pd.read_csv("data.csv")
@@ -83,15 +95,23 @@ def main():
     train_dataset = MCLIPDataset(train_data, xlmr_tokenizer, 77, clip_model, clip_tokenizer)
     test_dataset = MCLIPDataset(test_data, xlmr_tokenizer, 77, clip_model, clip_tokenizer)
 
-    train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=8, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
-    for epoch in range(10):
-        train_loss = train(model, train_loader, optimizer, scheduler, device)
+    model, optimizer, train_loader, scheduler = accelerator.prepare(
+        model, optimizer, train_loader, scheduler
+    )
+
+    for epoch in range(n_epochs):
+        train_loss = train(model, train_loader, optimizer, scheduler, device, accelerator)
+        torch.save(model.state_dict(), f"models/mclip_epoch_{epoch + 1}.pt")
         print(f"Epoch {epoch + 1} Train Loss: {train_loss:.4f}")
+
+    torch.save(model.state_dict(), "models/mclip_final.pt")
 
     model.eval()
     running_loss = 0.0
+    wandb.init(project="mclip", job_type="test")
     for inputs, targets in tqdm.tqdm(test_loader, total=len(test_loader)):
         inputs = {k: v.to(device) for k, v in inputs.items()}
         outputs = model.forward_before_clip(inputs["input_ids"])
