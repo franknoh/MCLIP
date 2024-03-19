@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+import torch.nn.functional as F
 from torch.nn.modules.module import T
 from transformers import XLMRobertaModel, CLIPTextModel
 from .clip import CLIPLayer
@@ -17,7 +18,7 @@ class MCLIP(nn.Module):
         self.clip_layers = self.clip_layers[:len(self.clip_layers) - n_layers]
         self.layernorm = clip_model.text_model.final_layer_norm
 
-    def forward(self, tokens) -> torch.FloatTensor:
+    def forward(self, tokens, target=None) -> torch.FloatTensor:
         state = self.xlmr_model(**tokens).last_hidden_state
         state = state.transpose(2, 1)
         state = self.embedding(state)
@@ -28,7 +29,12 @@ class MCLIP(nn.Module):
         for layer in self.clip_layers:
             state = layer(state, None, None)[0]
         output = self.layernorm(state)
-        return output
+
+        if target == None:
+            return output
+        else:
+            loss = F.mse_loss(output, target)
+            return output, loss
 
     def train(self: T, mode: bool = True) -> T:
         self.xlmr_model.train(False)

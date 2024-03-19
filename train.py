@@ -2,10 +2,9 @@ import sys
 import wandb
 import tqdm
 import pandas as pd
-from accelerate import Accelerator
+from accelerate import Accelerator, DistributedDataParallelKwargs
 import torch
 import torch.optim as optim
-import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer, XLMRobertaModel, CLIPTextModel
 from transformers import get_linear_schedule_with_warmup
@@ -31,7 +30,7 @@ class MCLIPDataset(Dataset):
         with torch.no_grad():
             outputs = self.clip_model(**tokens)
         outputs = outputs.last_hidden_state
-        outputs = outputs.squeeze(1)
+        outputs = outputs.squeeze(0)
         return outputs
 
     def __getitem__(self, idx):
@@ -49,30 +48,30 @@ def train(model: MCLIP, train_loader: DataLoader, optimizer: optim.Optimizer, sc
     for step, (inputs, targets) in tqdm.tqdm(enumerate(train_loader), total=len(train_loader)):
         inputs = {k: v.squeeze(1).to(device) for k, v in inputs.items()}
         optimizer.zero_grad()
-        outputs = model(inputs)
-        loss = F.mse_loss(outputs, targets)
+        _, loss = model(inputs, targets)
         accelerator.backward(loss)
         optimizer.step()
         scheduler.step()
         running_loss += loss.item()
         if use_wandb:
             wandb.log({"loss": loss.item()})
-        if step % 4000 == 0:
+        if (step+1) % 100 == 0:
             print(f"Step {step} Loss: {running_loss / (step + 1):.4f}")
             torch.save(model.state_dict(), f"models/mclip_{epoch + 1}_{step + 1}.pt")
     return running_loss / len(train_loader)
 
 
 def main():
-    batch_size = 8
+    batch_size = 32
     learning_rate = 1e-5
-    n_epochs = 10
+    n_epochs = 1
 
-    use_wandb = False
+    use_wandb = True
 
     if use_wandb:
-        wandb.init(project="mclip")
-    accelerator = Accelerator()
+        wandb.init(project="mclip", group="DDP")
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+    accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
     device = accelerator.device
 
     if use_wandb:
@@ -125,8 +124,7 @@ def main():
         wandb.init(project="mclip", job_type="test")
     for inputs, targets in tqdm.tqdm(test_loader, total=len(test_loader)):
         inputs = {k: v.to(device) for k, v in inputs.items()}
-        outputs = model(inputs["input_ids"])
-        loss = F.mse_loss(outputs, targets)
+        _, loss = model(inputs, targets)
         running_loss += loss.item()
         if use_wandb:
             wandb.log({"test_loss": loss.item()})
