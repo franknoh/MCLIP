@@ -43,10 +43,10 @@ class MCLIPDataset(Dataset):
 
 
 def train(model: MCLIP, train_loader: DataLoader, optimizer: optim.Optimizer, scheduler: optim.lr_scheduler,
-          device: torch.device, accelerator: Accelerator, use_wandb: bool) -> float:
+          device: torch.device, accelerator: Accelerator, use_wandb: bool, epoch: int) -> float:
     model.train()
     running_loss = 0.0
-    for inputs, targets in tqdm.tqdm(train_loader, total=len(train_loader)):
+    for step, (inputs, targets) in tqdm.tqdm(enumerate(train_loader), total=len(train_loader)):
         inputs = {k: v.squeeze(1).to(device) for k, v in inputs.items()}
         optimizer.zero_grad()
         outputs = model(inputs)
@@ -57,6 +57,9 @@ def train(model: MCLIP, train_loader: DataLoader, optimizer: optim.Optimizer, sc
         running_loss += loss.item()
         if use_wandb:
             wandb.log({"loss": loss.item()})
+        if step % 4000 == 0:
+            print(f"Step {step} Loss: {running_loss / (step + 1):.4f}")
+            torch.save(model.state_dict(), f"models/mclip_{epoch + 1}_{step + 1}.pt")
     return running_loss / len(train_loader)
 
 
@@ -110,8 +113,8 @@ def main():
     )
 
     for epoch in range(n_epochs):
-        train_loss = train(model, train_loader, optimizer, scheduler, device, accelerator, use_wandb)
-        torch.save(model.state_dict(), f"models/mclip_epoch_{epoch + 1}.pt")
+        train_loss = train(model, train_loader, optimizer, scheduler, device, accelerator, use_wandb, epoch)
+        torch.save(model.state_dict(), f"models/mclip_{epoch + 1}.pt")
         print(f"Epoch {epoch + 1} Train Loss: {train_loss:.4f}")
 
     torch.save(model.state_dict(), "models/mclip_final.pt")
