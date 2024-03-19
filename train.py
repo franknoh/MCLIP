@@ -30,6 +30,8 @@ class MCLIPDataset(Dataset):
         tokens = self.clip_tokenizer(text, return_tensors="pt", padding="max_length", truncation=True).to(self.device)
         with torch.no_grad():
             outputs = self.clip_model(**tokens)
+        outputs = outputs.last_hidden_state
+        outputs = outputs.squeeze(1)
         return outputs
 
     def __getitem__(self, idx):
